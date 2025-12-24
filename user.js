@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         M3U8 嗅探 + MediaGo 投喂器 (优化版 - 支持 Blob & Iframe)
 // @namespace    https://blog.zhecydn.asia/
-// @version      1.1
+// @version      1.2
 // @description  支持blob 链接嗅探 + Iframe 跨域通信 + 批量投喂 + 智能命名
 // @author       zhecydn 
 // @match        *://*/*
