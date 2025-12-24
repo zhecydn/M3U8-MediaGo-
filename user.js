@@ -1,290 +1,223 @@
 // ==UserScript==
-// @name         M3U8 嗅探 + MediaGo 投喂器
+// @name         M3U8 嗅探 + MediaGo 投喂器 (优化版 - 支持 Blob & Iframe)
 // @namespace    https://blog.zhecydn.asia/
-// @version      1.0
-// @description  可拖动面板 + 批量投喂 + 主题切换 + 面板内配置地址 + 双模式 + 智能命名（完全无隐私泄露）
-// @author       zhecydn
+// @version      1.1
+// @description  支持blob 链接嗅探 + Iframe 跨域通信 + 批量投喂 + 智能命名
+// @author       zhecydn 
 // @match        *://*/*
-// @license MIT
+// @allFrames    true
+// @run-at       document-start
+// @license      MIT
 // @grant        GM_xmlhttpRequest
 // @grant        GM_addStyle
 // @grant        GM_getValue
 // @grant        GM_setValue
 // ==/UserScript==
- 
+
 (function() {
     'use strict';
- 
-    // 配置区
+
+    // --- 1. 初始化配置 ---
     let MEDIAGO_URL = GM_getValue('mediago_url', '');
-    let theme = GM_getValue('theme', 'auto'); // 'dark', 'light', 'auto'
-    let mode = GM_getValue('mode', 'api'); // 'api' 或 'url'
-    let counter = GM_getValue('counter', {}); // 序号记忆
- 
+    let theme = GM_getValue('theme', 'auto');
+    let mode = GM_getValue('mode', 'api');
+    let counter = GM_getValue('counter', {});
     let detectedM3u8 = new Set();
     let panel = null;
- 
-    // 应用主题
-    function applyTheme() {
-        const prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
-        const isDark = (theme === 'auto' ? prefersDark : theme === 'dark');
- 
-        document.documentElement.style.setProperty('--bg', isDark ? 'rgba(0,0,0,0.92)' : 'rgba(255,255,255,0.92)');
-        document.documentElement.style.setProperty('--text', isDark ? 'white' : 'black');
-        document.documentElement.style.setProperty('--sub-bg', isDark ? 'rgba(255,255,255,0.05)' : 'rgba(0,0,0,0.05)');
-        document.documentElement.style.setProperty('--header-bg', isDark ? 'rgba(255,255,255,0.1)' : 'rgba(0,0,0,0.1)');
-        document.documentElement.style.setProperty('--button-bg', isDark ? '#00ff88' : '#00cc66');
-        document.documentElement.style.setProperty('--button-hover', isDark ? '#00cc66' : '#00994d');
-    }
- 
-    // 创建面板
-    function createPanel() {
-        panel = document.createElement('div');
-        panel.id = 'mediago-panel';
-        panel.innerHTML = `
-            <div id="panel-header">
-                🔔 检测到 m3u8 资源
-                <span style="float:right;font-size:18px;cursor:pointer;" id="theme-toggle">🌙</span>
-                <span style="float:right;margin-right:10px;cursor:pointer;" id="settings-btn">⚙️</span>
-            </div>
-            <div style="text-align:center;margin:10px 0;">
-                <button id="select-all">全选</button>
-                <button id="batch-send" style="margin-left:10px;background:#ff9900;">批量投喂选中</button>
-            </div>
-            <ul id="m3u8-list"></ul>
-            <div id="controls" style="margin-top:15px;padding-top:10px;border-top:1px solid #444;text-align:center;">
-                <label><input type="radio" name="mode" value="api" ${mode==='api'?'checked':''}> 纯 API（完全静默）</label>&nbsp;&nbsp;
-                <label><input type="radio" name="mode" value="url" ${mode==='url'?'checked':''}> URL 参数（支持 Referer）</label>
-            </div>
-            <small style="display:block;text-align:center;margin-top:10px;color:#aaa;">
-                拖动标题栏移动 · 批量投喂更高效
-            </small>
-        `;
-        GM_addStyle(`
-            :root { --bg: rgba(0,0,0,0.92); --text: white; --sub-bg: rgba(255,255,255,0.05); --header-bg: rgba(255,255,255,0.1); --button-bg: #00ff88; --button-hover: #00cc66; }
-            #mediago-panel {
-                position: fixed;
-                top: 20px;
-                right: 20px;
-                width: 400px;
-                max-height: 85vh;
-                overflow-y: auto;
-                background: var(--bg);
-                color: var(--text);
-                padding: 15px;
-                border-radius: 12px;
-                z-index: 999999;
-                font-family: Arial, sans-serif;
-                box-shadow: 0 6px 30px rgba(0,0,0,0.7);
-                user-select: none;
+
+    // --- 2. 跨页面通信 (针对 Iframe 嵌套) ---
+    if (window.self !== window.top) {
+        window.notifyTop = function(url) {
+            window.top.postMessage({ type: 'M3U8_FOUND_MSG', url: url }, '*');
+        };
+    } else {
+        window.addEventListener('message', function(event) {
+            if (event.data && event.data.type === 'M3U8_FOUND_MSG') {
+                addM3u8(event.data.url);
             }
-            #panel-header {
-                cursor: move;
-                margin-bottom: 12px;
-                font-size: 16px;
-                text-align: center;
-                padding: 8px 0;
-                background: var(--header-bg);
-                border-radius: 8px;
-            }
-            #mediago-panel ul { list-style: none; padding: 0; margin: 0; }
-            #mediago-panel li {
-                margin: 12px 0;
-                padding: 12px;
-                background: var(--sub-bg);
-                border-radius: 8px;
-                word-break: break-all;
-                position: relative;
-            }
-            #mediago-panel button {
-                background: var(--button-bg);
-                color: black;
-                border: none;
-                padding: 8px 16px;
-                border-radius: 8px;
-                cursor: pointer;
-                font-weight: bold;
-            }
-            #mediago-panel button:hover { background: var(--button-hover); }
-            #batch-send { background: #ff9900; }
-            #batch-send:hover { background: #cc7700; }
-            #select-all { background: #666; }
-            #select-all:hover { background: #555; }
-            .checkbox { position: absolute; top: 12px; left: 12px; }
-        `);
-        document.body.appendChild(panel);
- 
-        applyTheme();
- 
-        // 拖动功能
-        const header = document.getElementById('panel-header');
-        let isDragging = false, offsetX, offsetY;
-        header.addEventListener('mousedown', e => {
-            if (e.target.tagName === 'SPAN') return;
-            isDragging = true;
-            offsetX = e.clientX - panel.offsetLeft;
-            offsetY = e.clientY - panel.offsetTop;
-        });
-        document.addEventListener('mousemove', e => {
-            if (isDragging) {
-                panel.style.left = (e.clientX - offsetX) + 'px';
-                panel.style.top = (e.clientY - offsetY) + 'px';
-                panel.style.right = 'auto';
-            }
-        });
-        document.addEventListener('mouseup', () => isDragging = false);
- 
-        // 主题切换
-        document.getElementById('theme-toggle').addEventListener('click', () => {
-            if (theme === 'auto') theme = 'dark';
-            else if (theme === 'dark') theme = 'light';
-            else theme = 'auto';
-            GM_setValue('theme', theme);
-            applyTheme();
-            document.getElementById('theme-toggle').textContent = theme === 'light' ? '☀️' : '🌙';
-        });
- 
-        // 设置按钮（隐私安全版）
-        document.getElementById('settings-btn').addEventListener('click', () => {
-            const current = GM_getValue('mediago_url', '');
-            const newUrl = prompt('请输入你的 MediaGo 地址', current);
-            if (newUrl === null) return; // 取消
-            if (newUrl.trim() !== '') {
-                MEDIAGO_URL = newUrl.trim().replace(/\/+$/, '');
-                GM_setValue('mediago_url', MEDIAGO_URL);
-                alert('MediaGo 地址已保存！下次使用将生效');
-            } else {
-                alert('地址不能为空！');
-            }
-        });
- 
-        // 模式切换
-        panel.querySelectorAll('input[name="mode"]').forEach(radio => {
-            radio.addEventListener('change', e => {
-                mode = e.target.value;
-                GM_setValue('mode', mode);
-            });
-        });
- 
-        // 全选 & 批量投喂
-        document.getElementById('select-all').addEventListener('click', () => {
-            const allChecked = panel.querySelectorAll('input[type="checkbox"]').length === panel.querySelectorAll('input[type="checkbox"]:checked').length;
-            panel.querySelectorAll('input[type="checkbox"]').forEach(cb => cb.checked = !allChecked);
-        });
- 
-        document.getElementById('batch-send').addEventListener('click', () => {
-            const selected = panel.querySelectorAll('input[type="checkbox"]:checked');
-            if (selected.length === 0) return alert('请先选中要投喂的 m3u8');
-            if (selected.length > 10) return alert('一次最多批量投喂 10 个，避免卡顿');
- 
-            const urls = Array.from(selected).map(cb => cb.dataset.url);
-            batchSend(urls);
         });
     }
- 
-    // 添加 m3u8 到面板（带复选框）
+
+    // --- 3. 核心嗅探逻辑 (针对 XHR/Fetch/Blob) ---
     function addM3u8(url) {
-        if (detectedM3u8.has(url) || !url.toLowerCase().includes('.m3u8')) return;
+        if (typeof url !== 'string') return;
+        // 过滤常见的干扰项，匹配 .m3u8 链接
+        if (!/\.m3u8(\?|$)/i.test(url) || detectedM3u8.has(url)) return;
+        if (url.startsWith('blob:')) return; // blob 链接本身不可下载，我们需要的是它的原始请求
+
+        if (window.self !== window.top) {
+            window.notifyTop(url);
+            return;
+        }
+
         detectedM3u8.add(url);
- 
         if (!panel) createPanel();
- 
+
         const li = document.createElement('li');
         li.innerHTML = `
             <input type="checkbox" class="checkbox" data-url="${url}">
-            <div style="margin-left:35px;font-size:13px;margin-bottom:8px;">${url.length > 100 ? url.substring(0, 100) + '...' : url}</div>
-            <button data-url="${url}">投喂 NAS</button>
-            <div style="clear:both;"></div>
+            <div class="url-text" title="${url}">${url.split('?')[0].substring(0, 70)}...</div>
+            <button class="single-send">投喂 NAS</button>
         `;
         document.getElementById('m3u8-list').prepend(li);
- 
-        li.querySelector('button').addEventListener('click', e => {
-            e.stopPropagation();
-            sendToMediaGo(url);
-        });
+        li.querySelector('.single-send').onclick = () => sendToMediaGo(url);
     }
- 
-    // 智能获取文件名（弹窗 + 自动序号）
-    function getSmartName(baseTitle, callback) {
-        const userInput = prompt(`请输入文件名（可不填自动序号）\n原标题：${baseTitle}`, baseTitle);
-        let finalName;
-        if (userInput === null) return; // 取消
-        if (userInput.trim() === '') {
-            if (!counter[baseTitle]) counter[baseTitle] = 0;
-            counter[baseTitle]++;
-            finalName = counter[baseTitle] === 1 ? baseTitle : `${baseTitle} (${counter[baseTitle]})`;
-        } else {
-            finalName = userInput.trim();
+
+    // A. 拦截 XMLHttpRequest (最传统且有效的方法)
+    const origOpen = XMLHttpRequest.prototype.open;
+    XMLHttpRequest.prototype.open = function(method, url) {
+        try {
+            const fullUrl = new URL(url, location.href).href;
+            addM3u8(fullUrl);
+        } catch(e) {}
+        return origOpen.apply(this, arguments);
+    };
+
+    // B. 拦截 Fetch API (现代网页常用)
+    const origFetch = window.fetch;
+    window.fetch = function(res) {
+        let u = typeof res === 'string' ? res : (res && res.url);
+        if (u) {
+            try { addM3u8(new URL(u, location.href).href); } catch(e) {}
         }
-        GM_setValue('counter', counter);
-        callback(finalName);
-    }
- 
-    // 单个投喂
-    function sendToMediaGo(m3u8Url) {
-        const baseTitle = document.title.trim() || '未知视频';
-        getSmartName(baseTitle, name => {
-            if (!name) return;
-            executeSend(m3u8Url, name);
+        return origFetch.apply(this, arguments);
+    };
+
+    // C. 定时扫描 DOM (兜底方案，防止监听遗漏)
+    function scanDom() {
+        document.querySelectorAll('video, source, a').forEach(el => {
+            const src = el.src || el.getAttribute('src') || el.href;
+            if (src && src.includes('.m3u8')) {
+                try { addM3u8(new URL(src, location.href).href); } catch(e) {}
+            }
         });
     }
- 
-    // 批量投喂
-    function batchSend(urls) {
-        const baseTitle = document.title.trim() || '批量视频';
-        const prefix = prompt(`批量投喂 ${urls.length} 个视频\n请输入文件名前缀（可不填）`, baseTitle);
-        if (prefix === null) return;
- 
-        let index = 1;
-        urls.forEach(url => {
-            const name = prefix ? `${prefix.trim()} (${index++})` : `视频 ${index++}`;
-            setTimeout(() => executeSend(url, name), (index - 1) * 300); // 错开请求
-        });
-        alert(`已开始批量投喂 ${urls.length} 个任务！`);
-    }
- 
-    // 执行投喂（双模式）
-    function executeSend(m3u8Url, finalName) {
+    setInterval(scanDom, 3000);
+
+    // --- 4. 投喂逻辑 ---
+    function executeSend(url, name) {
+        if (!MEDIAGO_URL) return alert('请先点击齿轮设置 MediaGo 地址！');
+
         if (mode === 'api') {
-            const task = { name: finalName, url: m3u8Url, type: 'm3u8', folder: '' };
             GM_xmlhttpRequest({
                 method: 'POST',
                 url: `${MEDIAGO_URL}/api/download-now`,
                 headers: { 'Content-Type': 'application/json' },
-                data: JSON.stringify(task),
-                onload: r => alert(r.status >= 200 && r.status < 300 ? `🎉 纯 API 成功：${finalName}` : `❌ API 失败：${r.status}`),
-                onerror: () => alert('❌ API 请求错误')
+                data: JSON.stringify({ name: name, url: url, type: 'm3u8' }),
+                onload: r => {
+                    if (r.status >= 200 && r.status < 300) console.log('投喂成功');
+                    else alert('API 投喂失败，请检查地址或模式');
+                },
+                onerror: () => alert('连接 MediaGo 失败')
             });
         } else {
-            const headersStr = 'Referer:*';
-            const taskUrl = `${MEDIAGO_URL}/?n=true&name=${encodeURIComponent(finalName)}&url=${encodeURIComponent(m3u8Url)}&headers=${encodeURIComponent(headersStr)}&type=m3u8&silent=true`;
+            // URL 模式：支持 Referer 绕过防盗链
+            const taskUrl = `${MEDIAGO_URL}/?n=true&name=${encodeURIComponent(name)}&url=${encodeURIComponent(url)}&headers=${encodeURIComponent('Referer:*')}&type=m3u8&silent=true`;
             window.open(taskUrl, '_blank');
-            alert(`🔗 已打开 MediaGo 预填页面：${finalName}`);
         }
     }
- 
-    // 嗅探 XMLHttpRequest
-    const origOpen = XMLHttpRequest.prototype.open;
-    XMLHttpRequest.prototype.open = function(method, url) {
-        if (typeof url === 'string' && url.toLowerCase().includes('.m3u8')) {
-            const fullUrl = new URL(url, location.href).href;
-            addM3u8(fullUrl);
+
+    function sendToMediaGo(url) {
+        const baseTitle = document.title || '视频任务';
+        getSmartName(baseTitle, name => executeSend(url, name));
+    }
+
+    function batchSend(urls) {
+        const prefix = prompt(`准备投喂 ${urls.length} 个任务，请输入前缀:`, document.title);
+        if (prefix === null) return;
+        urls.forEach((url, i) => {
+            setTimeout(() => executeSend(url, `${prefix}_${i+1}`), i * 500);
+        });
+    }
+
+    function getSmartName(base, cb) {
+        let n = prompt('请输入文件名:', base);
+        if (n !== null) {
+            let finalName = n.trim() || base;
+            if (!counter[base]) counter[base] = 0;
+            counter[base]++;
+            cb(finalName + (finalName === base ? `_${counter[base]}` : ''));
+            GM_setValue('counter', counter);
         }
-        origOpen.apply(this, arguments);
-    };
- 
-    // 嗅探 fetch
-    const origFetch = window.fetch;
-    window.fetch = function(resource, options) {
-        let urlStr = typeof resource === 'string' ? resource : (resource && resource.url) || '';
-        if (typeof urlStr === 'string' && urlStr.toLowerCase().includes('.m3u8')) {
-            const fullUrl = new URL(urlStr, location.href).href;
-            addM3u8(fullUrl);
-        }
-        return origFetch.apply(this, arguments);
-    };
- 
-    // 系统主题变化监听
-    window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', applyTheme);
- 
+    }
+
+    // --- 5. UI 界面 (仅在主窗口渲染) ---
+    function createPanel() {
+        if (window.self !== window.top || document.getElementById('mediago-panel')) return;
+
+        panel = document.createElement('div');
+        panel.id = 'mediago-panel';
+        panel.innerHTML = `
+            <div id="panel-header">
+                🔍 资源嗅探器 (MediaGo)
+                <span id="theme-toggle" style="float:right;cursor:pointer;margin-left:10px;">🌓</span>
+                <span id="settings-btn" style="float:right;cursor:pointer;">⚙️</span>
+            </div>
+            <div style="display:flex; gap:10px; padding:10px; justify-content:center; border-bottom:1px solid rgba(128,128,128,0.2);">
+                <button id="select-all" style="background:#555;">全选</button>
+                <button id="batch-send" style="background:#e67e22;">批量投喂</button>
+            </div>
+            <ul id="m3u8-list"></ul>
+            <div id="footer-controls">
+                模式: <label><input type="radio" name="mode" value="api" ${mode==='api'?'checked':''}> API</label>
+                <label style="margin-left:8px;"><input type="radio" name="mode" value="url" ${mode==='url'?'checked':''}> URL参数</label>
+            </div>
+        `;
+
+        GM_addStyle(`
+            #mediago-panel {
+                position: fixed; top: 20px; right: 20px; width: 350px; max-height: 80vh;
+                background: var(--mg-bg, #fff); color: var(--mg-text, #000); padding: 12px;
+                border-radius: 10px; z-index: 2147483647; font-family: system-ui, sans-serif;
+                box-shadow: 0 12px 40px rgba(0,0,0,0.4); border: 1px solid rgba(128,128,128,0.3); overflow: hidden; display: flex; flex-direction: column;
+            }
+            #panel-header { cursor: move; padding: 10px; background: rgba(128,128,128,0.1); border-radius: 6px; font-weight: bold; margin-bottom: 5px; }
+            #m3u8-list { list-style: none; padding: 0; margin: 0; overflow-y: auto; flex: 1; }
+            #m3u8-list li { margin: 8px 0; padding: 10px; background: rgba(128,128,128,0.08); border-radius: 8px; position: relative; }
+            #footer-controls { margin-top: 10px; padding: 8px; font-size: 12px; text-align: center; border-top: 1px solid rgba(128,128,128,0.2); }
+            #mediago-panel button { color: white; border: none; padding: 5px 12px; border-radius: 4px; cursor: pointer; font-size: 12px; font-weight: bold; }
+            .single-send { background: #27ae60; margin-top: 5px; }
+            .checkbox { position: absolute; top: 12px; left: 8px; transform: scale(1.1); }
+            .url-text { margin-left: 28px; font-size: 11px; word-break: break-all; opacity: 0.8; margin-bottom: 5px; }
+        `);
+
+        document.body.appendChild(panel);
+        applyTheme();
+
+        // 交互绑定
+        const header = document.getElementById('panel-header');
+        let isDrag = false, ox, oy;
+        header.onmousedown = e => { if(e.target.tagName==='SPAN') return; isDrag=true; ox=e.clientX-panel.offsetLeft; oy=e.clientY-panel.offsetTop; };
+        document.onmousemove = e => { if(isDrag){ panel.style.left=(e.clientX-ox)+'px'; panel.style.top=(e.clientY-oy)+'px'; panel.style.right='auto'; } };
+        document.onmouseup = () => isDrag=false;
+
+        document.getElementById('settings-btn').onclick = () => {
+            let u = prompt('MediaGo 基础地址 (例如 http://192.168.1.5:8080):', MEDIAGO_URL);
+            if(u){ MEDIAGO_URL = u.trim().replace(/\/+$/, ''); GM_setValue('mediago_url', MEDIAGO_URL); }
+        };
+        document.getElementById('theme-toggle').onclick = () => {
+            theme = (theme==='dark'?'light':'dark');
+            GM_setValue('theme', theme); applyTheme();
+        };
+        document.getElementById('select-all').onclick = () => {
+            let cbs = panel.querySelectorAll('.checkbox');
+            let all = Array.from(cbs).every(c => c.checked);
+            cbs.forEach(c => c.checked = !all);
+        };
+        document.getElementById('batch-send').onclick = () => {
+            let urls = Array.from(panel.querySelectorAll('.checkbox:checked')).map(c => c.dataset.url);
+            if(urls.length) batchSend(urls);
+        };
+        panel.querySelectorAll('input[name="mode"]').forEach(r => {
+            r.onchange = e => { mode = e.target.value; GM_setValue('mode', mode); };
+        });
+    }
+
+    function applyTheme() {
+        const isDark = (theme === 'dark');
+        const r = document.documentElement;
+        r.style.setProperty('--mg-bg', isDark ? '#1a1a1a' : '#fff');
+        r.style.setProperty('--mg-text', isDark ? '#ddd' : '#111');
+    }
+
 })();
